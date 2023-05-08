@@ -1,0 +1,13 @@
+syntax = "proto3";
+package message;
+option go_package="./message";
+message ImgRequest{
+  string name=1;
+}
+message ImgResponse{
+  bytes data=1;
+}
+
+service ImgService{
+  rpc Get(ImgRequest) returns (ImgResponse);
+}

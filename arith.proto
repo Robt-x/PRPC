@@ -1,0 +1,29 @@
+// Copyright 2022 <mzh.scnu@qq.com>. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+syntax = "proto3";
+
+package message;
+option go_package="/message";
+
+// ArithService Defining Computational Digital Services
+service ArithService {
+  // Add addition
+  rpc Add(ArithRequest) returns (ArithResponse);
+  // Sub subtraction
+  rpc Sub(ArithRequest) returns (ArithResponse);
+  // Mul multiplication
+  rpc Mul(ArithRequest) returns (ArithResponse);
+  // Div division
+  rpc Div(ArithRequest) returns (ArithResponse);
+}
+
+message ArithRequest {
+  int64 a = 1;
+  int64 b = 2;
+}
+
+message ArithResponse {
+  int64 c = 1;
+}
