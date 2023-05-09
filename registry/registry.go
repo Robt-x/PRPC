@@ -5,10 +5,10 @@ import (
 	"PRPC/timewheel"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"math/rand"
-	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -18,6 +18,7 @@ import (
 
 const (
 	defaultPath                     = "/_prpc_/registry"
+	defaultBeatPath                 = "/_prpc_/server"
 	defaultBeatTimeout              = time.Second * 5
 	defaultUpdateTimeout            = time.Second * 5
 	Random               SelectMode = iota
@@ -36,79 +37,30 @@ type Discovery interface {
 	GetAll() ([]string, error)
 }
 
-type ServicesDiscovery struct {
-	r        *rand.Rand
-	mu       sync.RWMutex
-	services []string
-	index    int
-}
-
-func NewServicesDiscovery(services []string) *ServicesDiscovery {
-	d := &ServicesDiscovery{
-		r:        rand.New(rand.NewSource(time.Now().UnixNano())),
-		services: services,
-	}
-	d.index = d.r.Intn(math.MaxInt32 - 1)
-	return d
-}
-
-func (d *ServicesDiscovery) Refresh() error {
-	return nil
-}
-
-func (d *ServicesDiscovery) Update(services []string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.services = services
-	return nil
-}
-
-func (d *ServicesDiscovery) Get(mode SelectMode) (string, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	n := len(d.services)
-	if n == 0 {
-		return "", errors.New("rpc discovery: no available services")
-	}
-	switch mode {
-	case Random:
-		return d.services[d.r.Intn(n)], nil
-	case RoundRobin:
-		host := d.services[d.index%n]
-		d.index = (d.index + 1) % n
-		return host, nil
-	default:
-		return "", errors.New("rpc discovery: not supported select mode")
-	}
-}
-
-func (d *ServicesDiscovery) GetAll() ([]string, error) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	hosts := make([]string, len(d.services))
-	copy(hosts, d.services)
-	return hosts, nil
-}
-
-type RegistryDiscovery struct {
-	*ServicesDiscovery
+type ServiceDiscovery struct {
+	r          *rand.Rand
+	mu         sync.RWMutex
+	services   []string
+	index      int
 	registry   string
 	timeout    time.Duration
 	lastUpdate time.Time
 }
 
-func NewRegistryDiscovery(registry string, timeout time.Duration) *RegistryDiscovery {
+func NewRegistryDiscovery(registry string, timeout time.Duration) *ServiceDiscovery {
 	if timeout == 0 {
 		timeout = defaultUpdateTimeout
 	}
-	return &RegistryDiscovery{
-		ServicesDiscovery: NewServicesDiscovery(make([]string, 0)),
-		registry:          registry,
-		timeout:           timeout,
+	d := &ServiceDiscovery{
+		r:        rand.New(rand.NewSource(time.Now().UnixNano())),
+		registry: registry,
+		timeout:  timeout,
 	}
+	d.index = d.r.Intn(math.MaxInt32 - 1)
+	return d
 }
 
-func (d *RegistryDiscovery) Update(services []string) error {
+func (d *ServiceDiscovery) Update(services []string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.services = services
@@ -116,7 +68,7 @@ func (d *RegistryDiscovery) Update(services []string) error {
 	return nil
 }
 
-func (d *RegistryDiscovery) Refresh(service string) error {
+func (d *ServiceDiscovery) Refresh(service string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.lastUpdate.Add(d.timeout).After(time.Now()) {
@@ -142,19 +94,50 @@ func (d *RegistryDiscovery) Refresh(service string) error {
 	return nil
 }
 
-func (d *RegistryDiscovery) Get(mode SelectMode) (string, error) {
+func (d *ServiceDiscovery) Get(mode SelectMode) (string, error) {
 	err := d.Refresh("")
 	if err != nil {
 		return "", err
 	}
-	return d.ServicesDiscovery.Get(mode)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := len(d.services)
+	if n == 0 {
+		return "", errors.New("rpc discovery: no available services")
+	}
+	switch mode {
+	case Random:
+		return d.services[d.r.Intn(n)], nil
+	case RoundRobin:
+		host := d.services[d.index%n]
+		d.index = (d.index + 1) % n
+		return host, nil
+	default:
+		return "", errors.New("rpc discovery: not supported select mode")
+	}
 }
 
-func (d *RegistryDiscovery) GetAll() ([]string, error) {
+func (d *ServiceDiscovery) GetAll() ([]string, error) {
 	if err := d.Refresh(""); err != nil {
 		return nil, err
 	}
-	return d.ServicesDiscovery.GetAll()
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	hosts := make([]string, len(d.services))
+	copy(hosts, d.services)
+	return hosts, nil
+}
+
+func (d *ServiceDiscovery) ServeHTTP(w http.ResponseWriter, req *http.Request){
+	switch req.Method {
+	case "GET":
+
+	case "POST":
+	default:
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, "405 must CONNECT or GET\n")
+	}
 }
 
 type baseNode struct {
@@ -246,7 +229,7 @@ func (r *Registry) RegistryState() {
 	}
 }
 
-func (r *Registry) putServer(addr string, services []string) {
+func (r *Registry) addServer(addr string, services []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := r.servers[addr]
@@ -259,11 +242,12 @@ func (r *Registry) putServer(addr string, services []string) {
 		item.t = timewheel.NewTimer(defaultBeatTimeout, func() {
 			parts := strings.Split(addr, "@")
 			_, addr := parts[0], parts[1]
-			conn, err := net.Dial("tcp", addr)
+			port := strings.Split(addr, "[::]:")[1]
+			url := "http://localhost:" + port + defaultBeatPath
+			_, err := http.Get(url)
 			if err != nil {
 				r.removeServer(item.Addr)
 			}
-			_ = conn.Close()
 			item.start = time.Now()
 		}, true)
 		r.tw.AddTaskByTimer(item.t)
@@ -271,9 +255,25 @@ func (r *Registry) putServer(addr string, services []string) {
 	} else {
 		s.start = time.Now()
 	}
-	if services == nil {
+	r.addServices(addr, services)
+}
+
+func (r *Registry) removeServer(addr string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	server := r.servers[addr]
+	if server == nil {
+		logger.Infof("rpc register: %s server does not exist", addr)
 		return
 	}
+	delete(r.servers, addr)
+	for k, node := range server.services {
+		r.serviceMap[k].delete(node)
+	}
+	r.tw.RemoveTask(server.t)
+}
+
+func (r *Registry) addServices(addr string, services []string){
 	item := r.servers[addr]
 	for _, service := range services {
 		if _, ok := item.services[service]; !ok {
@@ -297,22 +297,7 @@ func (r *Registry) putServer(addr string, services []string) {
 	}
 }
 
-func (r *Registry) removeServer(addr string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	server := r.servers[addr]
-	if server == nil {
-		logger.Infof("rpc register: %s server does not exist", addr)
-		return
-	}
-	delete(r.servers, addr)
-	for k, node := range server.services {
-		r.serviceMap[k].delete(node)
-	}
-	r.tw.RemoveTask(server.t)
-}
-
-func (r *Registry) removeServices(addr string, service string) {
+func (r *Registry) removeService(addr string, service string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	item := r.servers[addr]
@@ -379,12 +364,12 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		if services == "" {
-			r.putServer(addr, nil)
+			r.addServer(addr, nil)
 		} else {
-			r.putServer(addr, strings.Split(services, ","))
+			r.addServer(addr, strings.Split(services, ","))
 		}
 		if service != "" {
-			r.removeServices(addr, service)
+			r.removeService(addr, service)
 		}
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)

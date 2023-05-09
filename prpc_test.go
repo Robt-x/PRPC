@@ -87,6 +87,6 @@ func Test(t *testing.T) {
 	//go startServer(registryAddr, &wg)
 	wg.Wait()
 	time.Sleep(2 * time.Second)
-	//call(registryAddr)
+	call(registryAddr)
 	select {}
 }

@@ -21,6 +21,10 @@ import (
 	"time"
 )
 
+const (
+	DefaultClientPath = "/_prpc_/clientDiscovery"
+)
+
 type Call struct {
 	Seq           uint64
 	ServiceMethod string
@@ -254,23 +258,23 @@ func dialTimeout(f newClientFunc, network, address string, opt *codec.Consult) (
 	}
 }
 
-func Dial(network, address string, opts ...*codec.Consult) (client *Client, err error) {
-	opt, err := parseOptions(opts...)
+func Dial(network, address string, opt *codec.Consult) (client *Client, err error) {
+	opt, err = parseOptions(opt)
 	if err != nil {
 		return nil, err
 	}
 	return dialTimeout(NewClient, network, address, opt)
 }
 
-func DialHTTP(network, address string, opts ...*codec.Consult) (*Client, error) {
-	opt, err := parseOptions(opts...)
+func HTTPDial(network, address string, opt *codec.Consult) (*Client, error) {
+	opt, err := parseOptions(opt)
 	if err != nil {
 		return nil, err
 	}
 	return dialTimeout(NewHTTPClient, network, address, opt)
 }
 
-func XDial(rpcAddr string, opts ...*codec.Consult) (*Client, error) {
+func XDial(rpcAddr string, opt *codec.Consult) (*Client, error) {
 	parts := strings.Split(rpcAddr, "@")
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("rpc client err: wrong format '%s', expect protocol@addr", rpcAddr)
@@ -278,27 +282,20 @@ func XDial(rpcAddr string, opts ...*codec.Consult) (*Client, error) {
 	protocol, addr := parts[0], parts[1]
 	switch protocol {
 	case "http":
-		return DialHTTP("tcp", addr, opts...)
+		return HTTPDial("tcp", addr, opt)
 	default:
-		// tcp, unix or other transport protocol
-		return Dial(protocol, addr, opts...)
+		return Dial(protocol, addr, opt)
 	}
 }
 
-func parseOptions(opts ...*codec.Consult) (*codec.Consult, error) {
-	if len(opts) == 0 || opts[0] == nil {
+func parseOptions(opt *codec.Consult) (*codec.Consult, error) {
+	if opt == nil {
 		return codec.DefaultConsult, nil
 	}
-	if len(opts) != 1 {
-		logger.Error("number of options is more than 1")
-		return nil, errors.New("number of options is more than 1")
-	}
-	opt := opts[0]
 	opt.MagicNumber = codec.DefaultConsult.MagicNumber
 	if opt.CodecType == "" {
 		opt.CodecType = codec.DefaultConsult.CodecType
 	}
-	logger.Info("consult parse successfully")
 	return opt, nil
 }
 

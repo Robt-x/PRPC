@@ -27,7 +27,7 @@ type Server struct {
 
 const (
 	connected        = "200 Connected to TinyRPC"
-	defaultRPCPath   = "/_pprc_"
+	defaultRPCPath   = "/_prpc_/server"
 	defaultDebugPath = "/debug/entity"
 )
 
@@ -51,25 +51,28 @@ func (server *Server) Accept(lis net.Listener) {
 }
 
 func (server *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	fmt.Println(111)
-	if req.Method != "CONNECT" {
+	switch req.Method {
+	case "GET":
+		w.Header().Set("BEAT", "pong")
+	case "CONNECT":
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			log.Print("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
+			return
+		}
+		_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
+		server.ServeConn(conn)
+	default:
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusMethodNotAllowed)
-		_, _ = io.WriteString(w, "405 must CONNECT\n")
-		return
+		_, _ = io.WriteString(w, "405 must CONNECT or GET\n")
 	}
-	conn, _, err := w.(http.Hijacker).Hijack()
-	if err != nil {
-		log.Print("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
-		return
-	}
-	_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
-	server.ServeConn(conn)
 }
 
 func (server *Server) HandleHTTP() {
 	http.Handle(defaultRPCPath, server)
 	http.Handle(defaultDebugPath, debugHTTP{server})
+	log.Println("rpc server rpc path:", defaultRPCPath)
 	log.Println("rpc server debug path:", defaultDebugPath)
 }
 
