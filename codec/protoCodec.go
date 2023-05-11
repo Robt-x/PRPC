@@ -2,10 +2,10 @@ package codec
 
 import (
 	"PRPC/compressor"
-	"PRPC/errors"
 	"PRPC/header"
 	"PRPC/logger"
 	"PRPC/pool"
+	"PRPC/rpcerrors"
 	"PRPC/serializer"
 	"bufio"
 	"fmt"
@@ -43,8 +43,8 @@ func (c *clientProtoCodec) WriteRequest(r *header.RPCHeader, param any) error {
 	c.pending[r.Seq] = r.ServiceMethod
 	c.mutex.Unlock()
 	if _, ok := compressor.Compressors[c.compressor]; !ok {
-		log.Println(errors.NotFoundCompressorError)
-		return errors.NotFoundCompressorError
+		log.Println(rpcerrors.NotFoundCompressorError)
+		return rpcerrors.NotFoundCompressorError
 	}
 	reqBody, err := c.serializer.Marshal(param)
 	if err != nil {
@@ -112,11 +112,11 @@ func (c *clientProtoCodec) ReadResponseBody(param any) error {
 	}
 	if c.response.Checksum != 0 {
 		if crc32.ChecksumIEEE(respBody) != c.response.Checksum {
-			return errors.UnexpectedChecksumError
+			return rpcerrors.UnexpectedChecksumError
 		}
 	}
 	if _, ok := compressor.Compressors[c.response.GetCompressType()]; !ok {
-		return errors.CompressorTypeMismatchError
+		return rpcerrors.CompressorTypeMismatchError
 	}
 	resp, err := compressor.Compressors[c.response.GetCompressType()].UnZip(respBody)
 	if err != nil {
@@ -201,12 +201,12 @@ func (s *serverProtoCodec) ReadRequestBody(param any) error {
 	if s.request.Checksum != 0 {
 		if crc32.ChecksumIEEE(reqBody) != s.request.Checksum {
 			log.Printf("UnexpectedChecksumError")
-			return errors.UnexpectedChecksumError
+			return rpcerrors.UnexpectedChecksumError
 		}
 	}
 	if _, ok := compressor.Compressors[s.request.GetCompressType()]; !ok {
-		fmt.Println(errors.CompressorTypeMismatchError)
-		return errors.CompressorTypeMismatchError
+		fmt.Println(rpcerrors.CompressorTypeMismatchError)
+		return rpcerrors.CompressorTypeMismatchError
 	}
 	body, err := compressor.Compressors[s.request.GetCompressType()].UnZip(reqBody)
 	if err != nil {
@@ -220,7 +220,7 @@ func (s *serverProtoCodec) WriteResponse(r *header.RPCHeader, param any) error {
 	reqCtx, ok := s.pending[r.Seq]
 	if !ok {
 		s.mutex.Unlock()
-		return errors.InvalidSequenceError
+		return rpcerrors.InvalidSequenceError
 	}
 	delete(s.pending, r.Seq)
 	s.mutex.Unlock()
@@ -228,7 +228,7 @@ func (s *serverProtoCodec) WriteResponse(r *header.RPCHeader, param any) error {
 		param = nil
 	}
 	if _, ok := compressor.Compressors[reqCtx.compareType]; !ok {
-		return errors.CompressorTypeMismatchError
+		return rpcerrors.CompressorTypeMismatchError
 	}
 	var respBody []byte
 	var err error

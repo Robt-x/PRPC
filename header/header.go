@@ -2,7 +2,7 @@ package header
 
 import (
 	"PRPC/compressor"
-	"PRPC/errors"
+	"PRPC/rpcerrors"
 	"encoding/binary"
 	"sync"
 )
@@ -55,11 +55,11 @@ func (r *RequestHeader) UnMarshal(data []byte) (err error) {
 	r.Lock()
 	defer r.Unlock()
 	if len(data) == 0 {
-		return errors.UnmarshalError
+		return rpcerrors.UnmarshalError
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			err = errors.UnmarshalError
+			err = rpcerrors.UnmarshalError
 		}
 	}()
 	idx, size := 0, 0
@@ -118,11 +118,11 @@ func (r *ResponseHeader) UnMarshal(data []byte) (err error) {
 	r.Lock()
 	defer r.Unlock()
 	if len(data) == 0 {
-		return errors.UnmarshalError
+		return rpcerrors.UnmarshalError
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			err = errors.UnmarshalError
+			err = rpcerrors.UnmarshalError
 		}
 	}()
 	idx, size := 0, 0

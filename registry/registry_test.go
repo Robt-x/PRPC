@@ -57,7 +57,7 @@ func foo(xc *entity.XClient, ctx context.Context, typ, serviceMethod string, arg
 	}
 }
 func call(registry string) {
-	d := NewRegistryDiscovery(registry, 0)
+	d := NewServiceDiscovery(registry, 0)
 	xc := entity.NewClientWithDiscovery(d, Random, nil)
 	defer func() { _ = xc.Close() }()
 	// send request & receive response
@@ -72,7 +72,7 @@ func call(registry string) {
 	wg.Wait()
 }
 func broadcast(registry string) {
-	d := NewRegistryDiscovery(registry, 0)
+	d := NewServiceDiscovery(registry, 0)
 	xc := entity.NewClientWithDiscovery(d, Random, nil)
 	defer func() { _ = xc.Close() }()
 	var wg sync.WaitGroup
@@ -94,7 +94,7 @@ func Test(t *testing.T) {
 	wg.Wait()
 	time.Sleep(time.Second)
 	port := <-addr
-	registryAddr := "http://localhost:" + port + "/_prpc_/registry"
+	registryAddr := "http://localhost:" + port + "/_prpc_/registryAddr"
 	wg.Add(2)
 	go startServer(registryAddr, &wg)
 	go startServer(registryAddr, &wg)

@@ -19,7 +19,7 @@ func _assert(condition bool, msg string, v ...interface{}) {
 	}
 }
 
-//func startServer(addr chan string) {
+//func startServer(Addr chan string) {
 //	if err := Register(&Foo{}); err != nil {
 //		logger.Fatal("register error:", err)
 //	}
@@ -28,15 +28,15 @@ func _assert(condition bool, msg string, v ...interface{}) {
 //	if err != nil {
 //		logger.Fatal("network error:", err)
 //	}
-//	logger.Println("start rpc server on", l.addr())
-//	addr <- l.addr().String()
+//	logger.Println("start rpc server on", l.Addr())
+//	Addr <- l.Addr().String()
 //	Accept(l)
 //}
 //func TestNewService(t *testing.T) {
 //	logger.SetFlags(0)
-//	addr := make(chan string)
-//	go startServer(addr)
-//	client, _ := Dial("tcp", <-addr)
+//	Addr := make(chan string)
+//	go startServer(Addr)
+//	client, _ := Dial("tcp", <-Addr)
 //	defer func() { _ = client.Close() }()
 //
 //	time.Sleep(time.Second)

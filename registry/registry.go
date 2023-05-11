@@ -3,12 +3,11 @@ package registry
 import (
 	"PRPC/logger"
 	"PRPC/timewheel"
-	"errors"
+	"bytes"
+	"container/list"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"log"
-	"math"
-	"math/rand"
 	"net/http"
 	"sort"
 	"strings"
@@ -17,196 +16,38 @@ import (
 )
 
 const (
-	defaultPath                     = "/_prpc_/registry"
+	defaultRegistryPath             = "/_prpc_/registry"
 	defaultBeatPath                 = "/_prpc_/server"
+	defaultDiscoveryPath            = "/_prpc_/discovery"
 	defaultBeatTimeout              = time.Second * 5
 	defaultUpdateTimeout            = time.Second * 5
 	Random               SelectMode = iota
 	RoundRobin
-	P2C
-	IPHash
-	ConsistentHash
 )
-
-type SelectMode uint
-
-type Discovery interface {
-	Refresh(service string) error
-	Update(servers []string) error
-	Get(mode SelectMode) (string, error)
-	GetAll() ([]string, error)
-}
-
-type ServiceDiscovery struct {
-	r          *rand.Rand
-	mu         sync.RWMutex
-	services   []string
-	index      int
-	registry   string
-	timeout    time.Duration
-	lastUpdate time.Time
-}
-
-func NewRegistryDiscovery(registry string, timeout time.Duration) *ServiceDiscovery {
-	if timeout == 0 {
-		timeout = defaultUpdateTimeout
-	}
-	d := &ServiceDiscovery{
-		r:        rand.New(rand.NewSource(time.Now().UnixNano())),
-		registry: registry,
-		timeout:  timeout,
-	}
-	d.index = d.r.Intn(math.MaxInt32 - 1)
-	return d
-}
-
-func (d *ServiceDiscovery) Update(services []string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.services = services
-	d.lastUpdate = time.Now()
-	return nil
-}
-
-func (d *ServiceDiscovery) Refresh(service string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.lastUpdate.Add(d.timeout).After(time.Now()) {
-		return nil
-	}
-	logger.Infof("rpc registry: refresh servers from registry", d.registry)
-	hc := http.Client{}
-	req, _ := http.NewRequest("GET", d.registry, nil)
-	if service != "" {
-		req.Header.Set("X-Prpc-service", service)
-	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		logger.Errorf("rpc registry refresh err:", err)
-		return err
-	}
-	servers := strings.Split(resp.Header.Get("X-Prpc-Servers"), ",")
-	if servers[0] == "" {
-		logger.Error("rpc registry: no service found")
-	}
-	d.services = servers
-	d.lastUpdate = time.Now()
-	return nil
-}
-
-func (d *ServiceDiscovery) Get(mode SelectMode) (string, error) {
-	err := d.Refresh("")
-	if err != nil {
-		return "", err
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	n := len(d.services)
-	if n == 0 {
-		return "", errors.New("rpc discovery: no available services")
-	}
-	switch mode {
-	case Random:
-		return d.services[d.r.Intn(n)], nil
-	case RoundRobin:
-		host := d.services[d.index%n]
-		d.index = (d.index + 1) % n
-		return host, nil
-	default:
-		return "", errors.New("rpc discovery: not supported select mode")
-	}
-}
-
-func (d *ServiceDiscovery) GetAll() ([]string, error) {
-	if err := d.Refresh(""); err != nil {
-		return nil, err
-	}
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	hosts := make([]string, len(d.services))
-	copy(hosts, d.services)
-	return hosts, nil
-}
-
-func (d *ServiceDiscovery) ServeHTTP(w http.ResponseWriter, req *http.Request){
-	switch req.Method {
-	case "GET":
-
-	case "POST":
-	default:
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_, _ = io.WriteString(w, "405 must CONNECT or GET\n")
-	}
-}
-
-type baseNode struct {
-	Head    *linkNode
-	Trailer *linkNode
-}
-
-func (b *baseNode) delete(n *linkNode) {
-	pre := n.Pre
-	next := n.Next
-	if n == b.Trailer {
-		if b.Head == n {
-			b.Head = nil
-			b.Trailer = nil
-		} else {
-			b.Trailer = pre
-			pre.Next = nil
-		}
-	} else {
-		if b.Head == n {
-			b.Head = next
-			next.Pre = nil
-		} else {
-			pre.Next = next
-			next.Pre = pre
-		}
-	}
-	n.Pre = nil
-	n.Next = nil
-}
-
-func (b *baseNode) insert(n *linkNode) {
-	if b.Head == nil {
-		b.Head = n
-		b.Trailer = n
-	} else {
-		b.Trailer.Next = n
-		n.Pre = b.Trailer
-		b.Trailer = n
-	}
-}
-
-type linkNode struct {
-	Item *ServerItem
-	Pre  *linkNode
-	Next *linkNode
-}
 
 type ServerItem struct {
 	Addr     string
 	t        *timewheel.Timer
-	services map[string]*linkNode
+	services map[string]*list.Element
 	start    time.Time
 }
 
 type Registry struct {
-	Timeout    time.Duration
-	mu         sync.Mutex
-	tw         *timewheel.TimeWheel
-	serviceMap map[string]*baseNode
-	servers    map[string]*ServerItem
+	aliveTimeout time.Duration
+	mu           sync.Mutex
+	tw           *timewheel.TimeWheel
+	serviceMap   map[string]*list.List
+	servers      map[string]*ServerItem
+	subscribers  map[string]*timewheel.Timer
 }
 
 func New(timeout time.Duration) *Registry {
 	rg := &Registry{
-		Timeout:    timeout,
-		tw:         timewheel.NewTimeWheel(time.Second, 60),
-		serviceMap: make(map[string]*baseNode),
-		servers:    make(map[string]*ServerItem),
+		aliveTimeout: timeout,
+		tw:           timewheel.NewTimeWheel(time.Second, 60),
+		serviceMap:   make(map[string]*list.List),
+		servers:      make(map[string]*ServerItem),
+		subscribers:  make(map[string]*timewheel.Timer),
 	}
 	rg.tw.Start()
 	return rg
@@ -219,11 +60,9 @@ func (r *Registry) RegistryState() {
 	defer r.mu.Unlock()
 	for service, ptr := range r.serviceMap {
 		fmt.Print(service + ": ")
-		p := ptr.Head
-		for p != nil {
-			item := p.Item
+		for p := ptr.Front(); p != nil; p = p.Next() {
+			item := p.Value.(*ServerItem)
 			fmt.Print(item.Addr + "\t")
-			p = p.Next
 		}
 		fmt.Println()
 	}
@@ -236,7 +75,7 @@ func (r *Registry) addServer(addr string, services []string) {
 	if s == nil {
 		item := &ServerItem{
 			Addr:     addr,
-			services: make(map[string]*linkNode),
+			services: make(map[string]*list.Element),
 			start:    time.Now(),
 		}
 		item.t = timewheel.NewTimer(defaultBeatTimeout, func() {
@@ -244,8 +83,11 @@ func (r *Registry) addServer(addr string, services []string) {
 			_, addr := parts[0], parts[1]
 			port := strings.Split(addr, "[::]:")[1]
 			url := "http://localhost:" + port + defaultBeatPath
-			_, err := http.Get(url)
-			if err != nil {
+			c := http.Client{}
+			req, _ := http.NewRequest("GET", url, nil)
+			req.Header.Set("BEAT", "Ping")
+			resp, err := c.Do(req)
+			if err != nil || resp.Header.Get("BEAT") != "Pong" {
 				r.removeServer(item.Addr)
 			}
 			item.start = time.Now()
@@ -267,32 +109,27 @@ func (r *Registry) removeServer(addr string) {
 		return
 	}
 	delete(r.servers, addr)
-	for k, node := range server.services {
-		r.serviceMap[k].delete(node)
+	for k, elem := range server.services {
+		r.serviceMap[k].Remove(elem)
 	}
 	r.tw.RemoveTask(server.t)
 }
 
-func (r *Registry) addServices(addr string, services []string){
+func (r *Registry) addServices(addr string, services []string) {
 	item := r.servers[addr]
 	for _, service := range services {
 		if _, ok := item.services[service]; !ok {
-			node := &linkNode{
-				Item: item,
-				Pre:  nil,
-				Next: nil,
-			}
-			item.services[service] = node
-			if b, exist := r.serviceMap[service]; exist {
-				b.insert(node)
+			var elem *list.Element
+			sl := r.serviceMap[service]
+			if sl != nil {
+				elem = sl.PushBack(item)
 			} else {
-				r.serviceMap[service] = &baseNode{
-					Head:    nil,
-					Trailer: nil,
-				}
-				r.serviceMap[service].insert(node)
+				sl = list.New()
+				elem = sl.PushBack(item)
+				r.serviceMap[service] = sl
 			}
-			logger.Infof("registry: ", service, " register from ", addr)
+			item.services[service] = elem
+			logger.Infof("registryAddr: ", service, " register from ", addr)
 		}
 	}
 }
@@ -302,12 +139,15 @@ func (r *Registry) removeService(addr string, service string) {
 	defer r.mu.Unlock()
 	item := r.servers[addr]
 	if item == nil {
-		logger.Errorf("registry: no available services from ", addr)
+		logger.Errorf("registryAddr: no available services from ", addr)
 		return
 	}
-	if n, ok := item.services[service]; ok {
-		r.serviceMap[service].delete(n)
-		logger.Infof("registry: ", service, " removed from ", addr)
+	if elem, ok := item.services[service]; ok {
+		r.serviceMap[service].Remove(elem)
+		logger.Infof("registryAddr: ", service, " removed from ", addr)
+		if r.serviceMap[service].Len() == 0 {
+			delete(r.serviceMap, service)
+		}
 	}
 }
 
@@ -315,14 +155,14 @@ func (r *Registry) aliveServer(service string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var alive []string
-	list := r.serviceMap[service]
-	for cur := list.Head; cur != nil; cur = cur.Next {
-		s := cur.Item
-		if r.Timeout == 0 || s.start.Add(r.Timeout).After(time.Now()) {
+	ls := r.serviceMap[service]
+	for cur := ls.Front(); cur != nil; cur = cur.Next() {
+		s := cur.Value.(*ServerItem)
+		if r.aliveTimeout == 0 || s.start.Add(r.aliveTimeout).After(time.Now()) {
 			alive = append(alive, s.Addr)
 		} else {
-			for k, n := range s.services {
-				r.serviceMap[k].delete(n)
+			for k, elem := range s.services {
+				r.serviceMap[k].Remove(elem)
 			}
 			delete(r.servers, s.Addr)
 		}
@@ -336,7 +176,7 @@ func (r *Registry) allAliveServer() []string {
 	defer r.mu.Unlock()
 	var alive []string
 	for addr, s := range r.servers {
-		if r.Timeout == 0 || s.start.Add(r.Timeout).After(time.Now()) {
+		if r.aliveTimeout == 0 || s.start.Add(r.aliveTimeout).After(time.Now()) {
 			alive = append(alive, addr)
 		} else {
 			delete(r.servers, addr)
@@ -346,30 +186,92 @@ func (r *Registry) allAliveServer() []string {
 	return alive
 }
 
+func (r *Registry) addSubscriber(subscriber string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exist := r.subscribers[subscriber]; exist {
+		return
+	}
+	t := r.tw.AddTask(defaultUpdateTimeout, func() {
+		services := make([]string, 0)
+		r.mu.Lock()
+		for k, _ := range r.serviceMap {
+			services = append(services, k)
+		}
+		r.mu.Unlock()
+		body := ""
+		for _, s := range services {
+			body += s + "+" + strings.Join(r.aliveServer(s), ",") + ";"
+		}
+		body = body[:len(body)-1]
+		c := http.Client{}
+		req, _ := http.NewRequest("POST", subscriber, bytes.NewBuffer([]byte(body)))
+		_, err := c.Do(req)
+		if err != nil {
+			r.removeSubscriber(subscriber)
+		}
+	}, true)
+	r.subscribers[subscriber] = t
+}
+
+func (r *Registry) removeSubscriber(subscriber string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t, exist := r.subscribers[subscriber]; exist {
+		r.tw.RemoveTask(t)
+		delete(r.subscribers, subscriber)
+	}
+
+}
+
 func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case "GET":
-		service := req.Header.Get("X-Prpc-service")
-		if service == "" {
-			w.Header().Set("X-Prpc-Servers", strings.Join(r.allAliveServer(), ","))
-		} else {
-			w.Header().Set("X-Prpc-Servers", strings.Join(r.aliveServer(service), ","))
+		switch req.Header.Get("DiscoverType") {
+		case "ServiceDiscover":
+			services := make([]string, 0)
+			r.mu.Lock()
+			for k, _ := range r.serviceMap {
+				services = append(services, k)
+			}
+			r.mu.Unlock()
+			body := ""
+			for _, s := range services {
+				body += s + "+" + strings.Join(r.aliveServer(s), ",") + ";"
+			}
+			_, _ = w.Write([]byte(body[:len(body)-1]))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
 		}
 	case "POST":
-		addr := req.Header.Get("X-Prpc-Server")
-		services := req.Header.Get("X-Prpc-Services")
-		service := req.Header.Get("X-Prpc-Service")
-		if addr == "" {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		if services == "" {
-			r.addServer(addr, nil)
-		} else {
-			r.addServer(addr, strings.Split(services, ","))
-		}
-		if service != "" {
-			r.removeService(addr, service)
+		switch req.Header.Get("RegisterType") {
+		case "Discovery":
+			subscriber := req.Header.Get("Addr")
+			operate := req.Header.Get("Operate")
+			switch operate {
+			case "subscribe":
+				r.addSubscriber(subscriber)
+				w.WriteHeader(http.StatusOK)
+			case "Unsubscribe":
+				r.removeSubscriber(subscriber)
+				w.WriteHeader(http.StatusOK)
+			}
+		case "Server":
+			addr := req.Header.Get("Server")
+			Operate := req.Header.Get("Operate")
+			btServices, _ := ioutil.ReadAll(req.Body)
+			services := string(btServices)
+			switch Operate {
+			case "Register":
+				r.addServer(addr, strings.Split(services, ","))
+			case "UnRegister":
+				serviceLs := strings.Split(services, ",")
+				for _, service := range serviceLs {
+					r.removeService(addr, service)
+				}
+			default:
+				w.WriteHeader(http.StatusBadRequest)
+			}
 		}
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -378,11 +280,11 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 func (r *Registry) HandleHTTP(registryPath string) {
 	http.Handle(registryPath, r)
-	log.Println("rpc registry path: ", registryPath)
+	log.Println("rpc registryAddr path: ", registryPath)
 }
 
 func HandleHTTP() {
-	DefaultRegistry.HandleHTTP(defaultPath)
+	DefaultRegistry.HandleHTTP(defaultRegistryPath)
 }
 
 func RegistryState() {

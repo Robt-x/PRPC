@@ -4,26 +4,23 @@ import (
 	"PRPC/codec"
 	"PRPC/header"
 	"PRPC/logger"
-	"PRPC/timewheel"
+	"PRPC/rpcerrors"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/go-redis/redis/v8"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
-
-type Server struct {
-	registry   string
-	addr       string
-	tw         *timewheel.TimeWheel
-	serviceMap sync.Map
-}
 
 const (
 	connected        = "200 Connected to TinyRPC"
@@ -31,8 +28,32 @@ const (
 	defaultDebugPath = "/debug/entity"
 )
 
+type RPCRequest struct {
+	h           *header.RPCHeader // header of RPCRequest
+	argv, reply reflect.Value     // argv and reply of RPCRequest
+	mtype       *methodType
+	svc         *service
+}
+
+type Server struct {
+	mu           sync.Mutex
+	RegistryAddr string
+	Addr         string
+	rd           *redis.Client
+	WorkIDs      []bool
+	serviceMap   sync.Map
+}
+
 func NewServer() *Server {
-	return &Server{}
+	IDs := make([]bool, 1024)
+	return &Server{
+		rd: redis.NewClient(&redis.Options{
+			Addr:     "127.0.0.1:6379",
+			Password: "",
+			DB:       0,
+		}),
+		WorkIDs: IDs,
+	}
 }
 
 var DefaultServer = NewServer()
@@ -53,15 +74,20 @@ func (server *Server) Accept(lis net.Listener) {
 func (server *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case "GET":
-		w.Header().Set("BEAT", "pong")
+		ping := req.Header.Get("BEAT")
+		if ping != "Ping" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("BEAT", "Pong")
 	case "CONNECT":
 		conn, _, err := w.(http.Hijacker).Hijack()
 		if err != nil {
-			log.Print("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
+			logger.Errorf("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
 			return
 		}
 		_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
-		server.ServeConn(conn)
+		go server.ServeConn(conn)
 	default:
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -82,16 +108,37 @@ func (server *Server) ServeConn(conn io.ReadWriteCloser) {
 		logger.Errorf("rpc server: options error: ", err)
 		return
 	}
+	server.mu.Lock()
+	opt.NodeID = -1
+	for i, f := range server.WorkIDs {
+		if !f {
+			opt.NodeID = int64(i)
+			break
+		}
+	}
+	if opt.NodeID != -1 {
+		server.WorkIDs[opt.NodeID] = true
+	}
+	server.mu.Unlock()
+	if err := json.NewEncoder(conn).Encode(opt); err != nil {
+		logger.Error("rpc client: options error: ", err)
+		_ = conn.Close()
+		return
+	}
+	if opt.NodeID == -1 {
+		logger.Errorf("rpc server: no available WorkID")
+		return
+	}
 	if opt.MagicNumber != codec.MagicNumber {
 		logger.Errorf("rpc server: invalid magic number %x", opt.MagicNumber)
 		return
 	}
-	scodec := codec.NewServerCodecFuncMap[opt.CodecType]
-	if scodec == nil {
+	codecFunc := codec.NewServerCodecFuncMap[opt.CodecType]
+	if codecFunc == nil {
 		logger.Errorf("rpc server: invalid codec type %s", opt.CodecType)
 		return
 	}
-	server.serveCodec(scodec(conn, &opt), opt)
+	server.serveCodec(codecFunc(conn, &opt), opt)
 }
 
 func (server *Server) serveCodec(sc codec.ServerCodec, opt codec.Consult) {
@@ -103,22 +150,18 @@ func (server *Server) serveCodec(sc codec.ServerCodec, opt codec.Consult) {
 			if req == nil {
 				break
 			}
-			req.h.Error = err.Error()
-			server.sendResponse(sc, req.h, invalidRequest, sending)
+			if err != rpcerrors.RepeatRequestError {
+				req.h.Error = err.Error()
+				server.sendResponse(sc, req.h, invalidRequest, sending)
+			}
+			logger.Errorf("repeat request %d", req.h.Seq)
+			continue
 		}
 		wg.Add(1)
-		//go server.handleRequest(sc, req, wg, sending, opt.HandleTimeout)
 		go server.handleRequest(sc, req, wg, sending, opt.HandleTimeout)
 	}
 	wg.Wait()
 	_ = sc.Close()
-}
-
-type RPCRequest struct {
-	h           *header.RPCHeader // header of RPCRequest
-	argv, reply reflect.Value     // argv and reply of RPCRequest
-	mtype       *methodType
-	svc         *service
 }
 
 func (server *Server) readRequest(sc codec.ServerCodec) (*RPCRequest, error) {
@@ -130,6 +173,17 @@ func (server *Server) readRequest(sc codec.ServerCodec) (*RPCRequest, error) {
 		}
 		return nil, err
 	}
+
+	server.mu.Lock()
+	res := server.rd.SetNX(context.Background(), strconv.FormatUint(h.Seq, 10), "0", 0)
+	if !res.Val() {
+		_ = sc.ReadRequestBody(nil)
+		server.mu.Unlock()
+		return &RPCRequest{h: &h}, rpcerrors.RepeatRequestError
+	}
+	logger.Infof("rpc server: add seq %d to redis\n", h.Seq)
+	server.mu.Unlock()
+
 	req := &RPCRequest{
 		h: &h,
 	}
@@ -185,49 +239,10 @@ func (server *Server) handleRequest(sc codec.ServerCodec, req *RPCRequest, wg *s
 	case <-called:
 		<-send
 	}
-}
-
-func (server *Server) Register(rcvr any) error {
-	svr := newService(rcvr)
-	if _, exist := server.serviceMap.LoadOrStore(svr.name, svr); exist {
-		return errors.New("rpc: service already defined: " + svr.name)
-	}
-	return nil
-}
-
-func (server *Server) RemoveFromRegistry(svrName string) {
-	_, loaded := server.serviceMap.LoadAndDelete(svrName)
-	if !loaded {
-		log.Printf("%s does not exist\n", svrName)
-		return
-	}
-	if server.registry == "" {
-		return
-	}
-	hClient := &http.Client{}
-	req, _ := http.NewRequest("POST", server.registry, nil)
-	req.Header.Set("X-Prpc-Server", server.addr)
-	req.Header.Set("X-Prpc-Service", svrName)
-	if _, err := hClient.Do(req); err != nil {
-		log.Println("rpc server: register update err:", err)
-	}
-}
-
-func (server *Server) UpdateToRegistry(registry string, addr string) {
-	services := make([]string, 0)
-	server.registry = registry
-	server.addr = addr
-	server.serviceMap.Range(func(key, value interface{}) bool {
-		services = append(services, key.(string))
-		return true
-	})
-	hClient := &http.Client{}
-	req, _ := http.NewRequest("POST", server.registry, nil)
-	req.Header.Set("X-Prpc-Server", server.addr)
-	req.Header.Set("X-Prpc-Services", strings.Join(services, ","))
-	if _, err := hClient.Do(req); err != nil {
-		log.Println("rpc server: register update err:", err)
-	}
+	server.mu.Lock()
+	server.rd.Del(context.Background(), strconv.FormatUint(req.h.Seq, 10))
+	logger.Infof("rpc server: remove seq %d from redis\n", req.h.Seq)
+	server.mu.Unlock()
 }
 
 func (server *Server) findService(serviceMethod string) (svc *service, mtype *methodType, err error) {
@@ -251,6 +266,53 @@ func (server *Server) findService(serviceMethod string) (svc *service, mtype *me
 		logger.Error(err)
 	}
 	return
+}
+
+func (server *Server) Register(rcvr any) error {
+	svr := newService(rcvr)
+	if _, exist := server.serviceMap.LoadOrStore(svr.name, svr); exist {
+		return errors.New("rpc: service already defined: " + svr.name)
+	}
+	return nil
+}
+
+func (server *Server) RemoveFromRegistry(service string) {
+	if server.RegistryAddr == "" {
+		return
+	}
+	_, loaded := server.serviceMap.LoadAndDelete(service)
+	if !loaded {
+		logger.Errorf("%s does not exist\n", service)
+		return
+	}
+	hClient := &http.Client{}
+	body := []byte(service)
+	req, _ := http.NewRequest("POST", server.RegistryAddr, bytes.NewBuffer(body))
+	req.Header.Set("RegisterType", "Server")
+	req.Header.Set("Server", server.Addr)
+	req.Header.Set("Operate", "UnRegister")
+	if _, err := hClient.Do(req); err != nil {
+		logger.Errorf("rpc server: register update err:", err)
+	}
+}
+
+func (server *Server) UpdateToRegistry(registry string, addr string) {
+	server.RegistryAddr = registry
+	server.Addr = addr
+	services := make([]string, 0)
+	server.serviceMap.Range(func(key, value interface{}) bool {
+		services = append(services, key.(string))
+		return true
+	})
+	body := []byte(strings.Join(services, ","))
+	hClient := &http.Client{}
+	req, _ := http.NewRequest("POST", server.RegistryAddr, bytes.NewBuffer(body))
+	req.Header.Set("RegisterType", "Server")
+	req.Header.Set("Server", server.Addr)
+	req.Header.Set("Operate", "Register")
+	if _, err := hClient.Do(req); err != nil {
+		log.Println("rpc server: register update err:", err)
+	}
 }
 
 func Register(rcvr interface{}) error {

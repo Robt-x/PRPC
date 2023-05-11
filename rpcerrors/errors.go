@@ -1,4 +1,4 @@
-package errors
+package rpcerrors
 
 import "errors"
 
@@ -9,4 +9,6 @@ var (
 	CompressorTypeMismatchError = errors.New("request and response Compressor type mismatch")
 	ErrShutdownError            = errors.New("connection is shut down")
 	UnmarshalError              = errors.New("an error occurred in Unmarshal")
+	RepeatRequestError          = errors.New("repeat Request")
+	DialTimeoutError            = errors.New("rpc client: connect timeout")
 )

@@ -38,6 +38,9 @@ type Consult struct {
 	CodecType      Type
 	compressor     compressor.CompressType
 	ConnectTimeout time.Duration
+	CallTimeout    time.Duration
+	Retry          uint64
+	NodeID         int64
 	HandleTimeout  time.Duration
 }
 
@@ -45,8 +48,10 @@ var DefaultConsult = &Consult{
 	MagicNumber:    MagicNumber,
 	CodecType:      GobType,
 	compressor:     compressor.Raw,
-	ConnectTimeout: time.Second * 10,
-	HandleTimeout:  time.Second * 10,
+	Retry:          3,
+	CallTimeout:    time.Second,
+	ConnectTimeout: time.Second,
+	HandleTimeout:  time.Second * 6,
 }
 
 var NewClientCodecFuncMap map[Type]NewClientCodecFunc
