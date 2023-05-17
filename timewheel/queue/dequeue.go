@@ -61,7 +61,7 @@ func (pq *priorityQueue) Pop() interface{} {
 	return item
 }
 
-func (pq *priorityQueue) PeakAndShift(now int64) (*Item, int64) {
+func (pq *priorityQueue) ShiftAndPeak(now int64) (*Item, int64) {
 	if pq.Len() == 0 {
 		return nil, 0
 	}
@@ -109,7 +109,7 @@ func (dq *DelayQueue) Poll(exitC chan struct{}, nowF func() int64) {
 	for {
 		now := nowF()
 		dq.mu.Lock()
-		item, delta := dq.pq.PeakAndShift(now)
+		item, delta := dq.pq.ShiftAndPeak(now)
 		if item == nil {
 			//没有剩余item或存在item未过期
 			atomic.StoreInt32(&dq.sleeping, 1)

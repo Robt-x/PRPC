@@ -5,6 +5,7 @@ import (
 	"PRPC/header"
 	"PRPC/logger"
 	"PRPC/rpcerrors"
+	"PRPC/timewheel"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -37,8 +38,10 @@ type RPCRequest struct {
 
 type Server struct {
 	mu           sync.Mutex
+	sending      sync.Mutex
 	RegistryAddr string
 	Addr         string
+	tw           *timewheel.TimeWheel
 	rd           *redis.Client
 	WorkIDs      []bool
 	serviceMap   sync.Map
@@ -46,14 +49,17 @@ type Server struct {
 
 func NewServer() *Server {
 	IDs := make([]bool, 1024)
-	return &Server{
+	s := &Server{
 		rd: redis.NewClient(&redis.Options{
 			Addr:     "127.0.0.1:6379",
 			Password: "",
 			DB:       0,
 		}),
+		tw:      timewheel.NewTimeWheel(time.Millisecond, 512),
 		WorkIDs: IDs,
 	}
+	s.tw.Start()
+	return s
 }
 
 var DefaultServer = NewServer()
@@ -99,7 +105,6 @@ func (server *Server) HandleHTTP() {
 	http.Handle(defaultRPCPath, server)
 	http.Handle(defaultDebugPath, debugHTTP{server})
 	log.Println("rpc server rpc path:", defaultRPCPath)
-	log.Println("rpc server debug path:", defaultDebugPath)
 }
 
 func (server *Server) ServeConn(conn io.ReadWriteCloser) {
@@ -142,29 +147,28 @@ func (server *Server) ServeConn(conn io.ReadWriteCloser) {
 }
 
 func (server *Server) serveCodec(sc codec.ServerCodec, opt codec.Consult) {
-	sending := new(sync.Mutex)
 	wg := new(sync.WaitGroup)
 	for {
-		req, err := server.readRequest(sc)
+		req, err := server.readRequest(sc, opt)
 		if err != nil {
 			if req == nil {
 				break
 			}
 			if err != rpcerrors.RepeatRequestError {
 				req.h.Error = err.Error()
-				server.sendResponse(sc, req.h, invalidRequest, sending)
+				server.sendResponse(sc, req.h, invalidRequest)
 			}
 			logger.Errorf("repeat request %d", req.h.Seq)
 			continue
 		}
 		wg.Add(1)
-		go server.handleRequest(sc, req, wg, sending, opt.HandleTimeout)
+		go server.handleRequest(sc, req, wg, opt.HandleTimeout)
 	}
 	wg.Wait()
 	_ = sc.Close()
 }
 
-func (server *Server) readRequest(sc codec.ServerCodec) (*RPCRequest, error) {
+func (server *Server) readRequest(sc codec.ServerCodec, opt codec.Consult) (*RPCRequest, error) {
 	var h header.RPCHeader
 	err := sc.ReadRequestHeader(&h)
 	if err != nil {
@@ -173,9 +177,8 @@ func (server *Server) readRequest(sc codec.ServerCodec) (*RPCRequest, error) {
 		}
 		return nil, err
 	}
-
 	server.mu.Lock()
-	res := server.rd.SetNX(context.Background(), strconv.FormatUint(h.Seq, 10), "0", 0)
+	res := server.rd.SetNX(context.Background(), strconv.FormatUint(h.Seq, 10), "0", opt.HandleTimeout)
 	if !res.Val() {
 		_ = sc.ReadRequestBody(nil)
 		server.mu.Unlock()
@@ -183,7 +186,6 @@ func (server *Server) readRequest(sc codec.ServerCodec) (*RPCRequest, error) {
 	}
 	logger.Infof("rpc server: add seq %d to redis\n", h.Seq)
 	server.mu.Unlock()
-
 	req := &RPCRequest{
 		h: &h,
 	}
@@ -203,46 +205,33 @@ func (server *Server) readRequest(sc codec.ServerCodec) (*RPCRequest, error) {
 	return req, nil
 }
 
-func (server *Server) sendResponse(sc codec.ServerCodec, h *header.RPCHeader, body interface{}, sending *sync.Mutex) {
-	sending.Lock()
-	defer sending.Unlock()
+func (server *Server) sendResponse(sc codec.ServerCodec, h *header.RPCHeader, body interface{}) {
+	server.sending.Lock()
+	defer server.sending.Unlock()
 	if err := sc.WriteResponse(h, body); err != nil {
 		logger.Errorf("rpc server: write response error:", err)
 	}
 }
 
-func (server *Server) handleRequest(sc codec.ServerCodec, req *RPCRequest, wg *sync.WaitGroup, sending *sync.Mutex, timeout time.Duration) {
+func (server *Server) handleRequest(sc codec.ServerCodec, req *RPCRequest, wg *sync.WaitGroup, timeout time.Duration) {
 	defer wg.Done()
-	called := make(chan struct{})
-	send := make(chan struct{})
+	calling := make(chan error)
+	t := server.tw.AddTask(timeout, func() {
+		calling <- errors.New(fmt.Sprintf("rpc server: request handle timeout: expect within %s", timeout))
+	}, false)
 	go func() {
 		err := req.svc.call(req.mtype, req.argv, req.reply)
-		called <- struct{}{}
-		if err != nil {
-			req.h.Error = err.Error()
-			server.sendResponse(sc, req.h, invalidRequest, sending)
-			send <- struct{}{}
-			return
+		if server.tw.RemoveTask(t) {
+			calling <- err
 		}
-		server.sendResponse(sc, req.h, req.reply.Interface(), sending)
-		send <- struct{}{}
 	}()
-	if timeout == 0 {
-		<-called
-		<-send
-		return
+	err := <-calling
+	if err != nil {
+		req.h.Error = err.Error()
+		server.sendResponse(sc, req.h, invalidRequest)
+	} else {
+		server.sendResponse(sc, req.h, req.reply.Interface())
 	}
-	select {
-	case <-time.After(timeout):
-		req.h.Error = fmt.Sprintf("rpc server: request handle timeout: expect within %s", timeout)
-		server.sendResponse(sc, req.h, invalidRequest, sending)
-	case <-called:
-		<-send
-	}
-	server.mu.Lock()
-	server.rd.Del(context.Background(), strconv.FormatUint(req.h.Seq, 10))
-	logger.Infof("rpc server: remove seq %d from redis\n", req.h.Seq)
-	server.mu.Unlock()
 }
 
 func (server *Server) findService(serviceMethod string) (svc *service, mtype *methodType, err error) {
@@ -313,6 +302,10 @@ func (server *Server) UpdateToRegistry(registry string, addr string) {
 	if _, err := hClient.Do(req); err != nil {
 		log.Println("rpc server: register update err:", err)
 	}
+}
+
+func UpdateToRegistry(registry string, addr string) {
+	DefaultServer.UpdateToRegistry(registry, addr)
 }
 
 func Register(rcvr interface{}) error {

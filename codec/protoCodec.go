@@ -22,8 +22,6 @@ type clientProtoCodec struct {
 	compressor compressor.CompressType
 	serializer serializer.Serializer
 	response   header.ResponseHeader
-	mutex      sync.Mutex
-	pending    map[uint64]string
 }
 
 func NewClientProtoCodec(conn io.ReadWriteCloser, opt *Consult) ClientCodec {
@@ -34,14 +32,10 @@ func NewClientProtoCodec(conn io.ReadWriteCloser, opt *Consult) ClientCodec {
 		c:          conn,
 		compressor: opt.compressor,
 		serializer: serializer.Proto,
-		pending:    make(map[uint64]string),
 	}
 }
 
 func (c *clientProtoCodec) WriteRequest(r *header.RPCHeader, param any) error {
-	c.mutex.Lock()
-	c.pending[r.Seq] = r.ServiceMethod
-	c.mutex.Unlock()
 	if _, ok := compressor.Compressors[c.compressor]; !ok {
 		log.Println(rpcerrors.NotFoundCompressorError)
 		return rpcerrors.NotFoundCompressorError
@@ -88,12 +82,8 @@ func (c *clientProtoCodec) ReadResponseHeader(r *header.RPCHeader) error {
 	if err != nil {
 		return err
 	}
-	c.mutex.Lock()
 	r.Seq = c.response.ID
 	r.Error = c.response.Error
-	r.ServiceMethod = c.pending[r.Seq]
-	delete(c.pending, r.Seq)
-	c.mutex.Unlock()
 	return err
 }
 
@@ -148,7 +138,6 @@ type serverProtoCodec struct {
 	serializer serializer.Serializer
 	compressor compressor.CompressType
 	mutex      sync.Mutex
-	seq        uint64
 	pending    map[uint64]*reqCtx
 }
 
@@ -175,10 +164,9 @@ func (s *serverProtoCodec) ReadRequestHeader(r *header.RPCHeader) error {
 		return err
 	}
 	s.mutex.Lock()
-	s.seq++
-	s.pending[s.seq] = &reqCtx{s.request.ID, s.request.GetCompressType()}
+	s.pending[s.request.ID] = &reqCtx{s.request.ID, s.request.GetCompressType()}
 	r.ServiceMethod = s.request.Method
-	r.Seq = s.seq
+	r.Seq = s.request.ID
 	s.mutex.Unlock()
 	return err
 

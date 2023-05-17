@@ -26,7 +26,7 @@ type ServiceDiscovery struct {
 	r             *rand.Rand
 	mu            sync.RWMutex
 	services      map[string][]string
-	index         map[string]int
+	idx           map[string]int
 	registryAddr  string
 	discoveryAddr string
 	timeout       time.Duration
@@ -40,7 +40,7 @@ func NewServiceDiscovery(registryAddr string, timeout time.Duration) *ServiceDis
 	d := &ServiceDiscovery{
 		r:            rand.New(rand.NewSource(time.Now().UnixNano())),
 		services:     make(map[string][]string),
-		index:        make(map[string]int),
+		idx:          make(map[string]int),
 		registryAddr: registryAddr,
 		timeout:      timeout,
 	}
@@ -59,7 +59,7 @@ func (d *ServiceDiscovery) Update(serviceType string, services []string) error {
 		return nil
 	}
 	if d.services[serviceType] == nil {
-		d.index[serviceType] = d.r.Intn(math.MaxInt32 - 1)
+		d.idx[serviceType] = d.r.Intn(math.MaxInt32 - 1)
 	}
 	d.services[serviceType] = services
 	d.lastUpdate = time.Now()
@@ -110,8 +110,8 @@ func (d *ServiceDiscovery) Get(serviceType string, mode SelectMode) (string, err
 	case Random:
 		return d.services[serviceType][d.r.Intn(n)], nil
 	case RoundRobin:
-		host := d.services[serviceType][d.index[serviceType]%n]
-		d.index[serviceType] = (d.index[serviceType] + 1) % n
+		host := d.services[serviceType][d.idx[serviceType]%n]
+		d.idx[serviceType] = (d.idx[serviceType] + 1) % n
 		return host, nil
 	default:
 		return "", errors.New("rpc discovery: not supported select mode")

@@ -128,6 +128,7 @@ func (client *Client) Go(serviceMethod string, args, reply interface{}, done cha
 	call := &Call{
 		ServiceMethod: serviceMethod,
 		Args:          args,
+		retries:       1,
 		Reply:         reply,
 		Done:          done,
 	}
@@ -138,7 +139,7 @@ func (client *Client) Go(serviceMethod string, args, reply interface{}, done cha
 		return call
 	}
 	t := client.tw.AddTask(client.opt.CallTimeout, func() {
-		logger.Errorf("%d retrying.....", call.Seq)
+		logger.Errorf("%d retrying with times %d.....", call.Seq, call.retries)
 		if call.retries < client.opt.Retry {
 			call.retries++
 			client.send(call)
@@ -229,7 +230,7 @@ func NewClient(conn net.Conn, opt *codec.Consult) (*Client, error) {
 		opt:       opt,
 		pending:   make(map[uint64]*Call),
 		generator: Generator{},
-		tw:        timewheel.NewTimeWheel(time.Second, 256),
+		tw:        timewheel.NewTimeWheel(time.Millisecond, 512),
 	}
 	client.tw.Start()
 	err := client.generator.Init("2021-12-03", opt.NodeID)
@@ -240,6 +241,10 @@ func NewClient(conn net.Conn, opt *codec.Consult) (*Client, error) {
 	go client.receive()
 	logger.Info("rpc client: client created successfully")
 	return client, nil
+}
+
+func Dial(network, address string, opt *codec.Consult) (client *Client, err error) {
+	return dialWithTimeout(NewClient, network, address, parseOptions(opt))
 }
 
 func NewHTTPClient(conn net.Conn, opt *codec.Consult) (*Client, error) {
@@ -253,6 +258,10 @@ func NewHTTPClient(conn net.Conn, opt *codec.Consult) (*Client, error) {
 		logger.Error(err)
 	}
 	return nil, err
+}
+
+func HTTPDial(network, address string, opt *codec.Consult) (*Client, error) {
+	return dialWithTimeout(NewHTTPClient, network, address, parseOptions(opt))
 }
 
 func dialWithTimeout(f newClientFunc, network, address string, opt *codec.Consult) (client *Client, err error) {
@@ -286,14 +295,6 @@ func dialWithTimeout(f newClientFunc, network, address string, opt *codec.Consul
 		logger.Infof("rpc client: connect to %s successfully", address)
 		return result.client, result.err
 	}
-}
-
-func Dial(network, address string, opt *codec.Consult) (client *Client, err error) {
-	return dialWithTimeout(NewClient, network, address, parseOptions(opt))
-}
-
-func HTTPDial(network, address string, opt *codec.Consult) (*Client, error) {
-	return dialWithTimeout(NewHTTPClient, network, address, parseOptions(opt))
 }
 
 func XDial(rpcAddr string, opt *codec.Consult) (*Client, error) {
@@ -375,18 +376,14 @@ func (xc *XClient) dial(rpcAddr string) (*Client, error) {
 	return client, nil
 }
 
-func (xc *XClient) call(rpcAddr string, serviceMethod string, arg, reply interface{}) error {
-	client, err := xc.dial(rpcAddr)
-	if err != nil {
-		return err
-	}
-	return client.Call(serviceMethod, arg, reply)
-}
-
 func (xc *XClient) Call(serviceMethod string, args, reply interface{}) error {
 	rpcAddr, err := xc.d.Get(strings.Split(serviceMethod, ".")[0], xc.mode)
 	if err != nil {
 		return err
 	}
-	return xc.call(rpcAddr, serviceMethod, args, reply)
+	client, err := xc.dial(rpcAddr)
+	if err != nil {
+		return err
+	}
+	return client.Call(serviceMethod, args, reply)
 }

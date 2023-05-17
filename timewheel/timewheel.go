@@ -93,7 +93,11 @@ func (tw *TimeWheel) AddTaskByTimer(t *Timer) {
 }
 
 func (tw *TimeWheel) RemoveTask(t *Timer) bool {
-	return t.getBucket().Remove(t)
+	slot := t.getBucket()
+	if slot == nil {
+		return false
+	}
+	return slot.Remove(t)
 }
 
 func (tw *TimeWheel) advanceClock(expiration int64) {

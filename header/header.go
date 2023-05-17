@@ -10,6 +10,7 @@ import (
 const (
 	// MaxHeaderSize = 2 + 10 + 10 + 10 + 4 (10 refer to binary.MaxVarintLen64)
 	MaxHeaderSize = 36
+	Uint64Size    = 8
 	Uint32Size    = 4
 	Uint16Size    = 2
 )
@@ -40,13 +41,14 @@ func (r *RequestHeader) Marshal() []byte {
 	defer r.RUnlock()
 	idx := 0
 	header := make([]byte, MaxHeaderSize+len(r.Method))
-	binary.LittleEndian.PutUint16(header, uint16(r.CompressType))
+	binary.BigEndian.PutUint16(header, uint16(r.CompressType))
 	idx += Uint16Size
 	idx += WriteString(header[idx:], r.Method)
-	idx += binary.PutUvarint(header[idx:], r.ID)
-	binary.LittleEndian.PutUint32(header[idx:], r.RequestLen)
+	binary.BigEndian.PutUint64(header[idx:], r.ID)
+	idx += Uint64Size
+	binary.BigEndian.PutUint32(header[idx:], r.RequestLen)
 	idx += Uint32Size
-	binary.LittleEndian.PutUint32(header[idx:], r.Checksum)
+	binary.BigEndian.PutUint32(header[idx:], r.Checksum)
 	idx += Uint32Size
 	return header[:idx]
 }
@@ -63,15 +65,15 @@ func (r *RequestHeader) UnMarshal(data []byte) (err error) {
 		}
 	}()
 	idx, size := 0, 0
-	r.CompressType = compressor.CompressType(binary.LittleEndian.Uint16(data[idx:]))
+	r.CompressType = compressor.CompressType(binary.BigEndian.Uint16(data[idx:]))
 	idx += Uint16Size
 	r.Method, size = ReadString(data[idx:])
 	idx += size
-	r.ID, size = binary.Uvarint(data[idx:])
-	idx += size
-	r.RequestLen = binary.LittleEndian.Uint32(data[idx:])
+	r.ID = binary.BigEndian.Uint64(data[idx:])
+	idx += Uint64Size
+	r.RequestLen = binary.BigEndian.Uint32(data[idx:])
 	idx += Uint32Size
-	r.Checksum = binary.LittleEndian.Uint32(data[idx:])
+	r.Checksum = binary.BigEndian.Uint32(data[idx:])
 	return err
 }
 
@@ -103,13 +105,12 @@ func (r *ResponseHeader) Marshal() []byte {
 	defer r.RUnlock()
 	idx := 0
 	header := make([]byte, MaxHeaderSize+len(r.Error))
-	binary.LittleEndian.PutUint16(header, uint16(r.CompressType))
+	binary.BigEndian.PutUint16(header, uint16(r.CompressType))
 	idx += Uint16Size
 	idx += binary.PutUvarint(header[idx:], r.ID)
 	idx += WriteString(header[idx:], r.Error)
-	binary.LittleEndian.PutUint32(header[idx:], r.ResponseLen)
-	idx += Uint32Size
-	binary.LittleEndian.PutUint32(header[idx:], r.Checksum)
+	idx += binary.PutUvarint(header[idx:], uint64(r.ResponseLen))
+	binary.BigEndian.PutUint32(header[idx:], r.Checksum)
 	idx += Uint32Size
 	return header[:idx]
 }
@@ -126,15 +127,16 @@ func (r *ResponseHeader) UnMarshal(data []byte) (err error) {
 		}
 	}()
 	idx, size := 0, 0
-	r.CompressType = compressor.CompressType(binary.LittleEndian.Uint16(data[idx:]))
+	r.CompressType = compressor.CompressType(binary.BigEndian.Uint16(data[idx:]))
 	idx += Uint16Size
 	r.ID, size = binary.Uvarint(data[idx:])
 	idx += size
 	r.Error, size = ReadString(data[idx:])
 	idx += size
-	r.ResponseLen = binary.LittleEndian.Uint32(data[idx:])
-	idx += Uint32Size
-	r.Checksum = binary.LittleEndian.Uint32(data[idx:])
+	length, size := binary.Uvarint(data[idx:])
+	r.ResponseLen = uint32(length)
+	idx += size
+	r.Checksum = binary.BigEndian.Uint32(data[idx:])
 	return err
 }
 
@@ -154,8 +156,8 @@ func (r *ResponseHeader) ResetHeader() {
 
 func ReadString(data []byte) (string, int) {
 	idx := 0
-	length, size := binary.Uvarint(data)
-	idx += size
+	length := binary.BigEndian.Uint32(data)
+	idx += Uint32Size
 	str := string(data[idx : idx+int(length)])
 	idx += len(str)
 	return str, idx
@@ -163,7 +165,8 @@ func ReadString(data []byte) (string, int) {
 
 func WriteString(data []byte, str string) int {
 	idx := 0
-	idx += binary.PutUvarint(data, uint64(len(str)))
+	binary.BigEndian.PutUint32(data, uint32(len(str)))
+	idx += Uint32Size
 	copy(data[idx:], str)
 	idx += len(str)
 	return idx

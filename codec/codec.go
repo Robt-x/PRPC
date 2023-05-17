@@ -51,7 +51,7 @@ var DefaultConsult = &Consult{
 	Retry:          3,
 	CallTimeout:    time.Second,
 	ConnectTimeout: time.Second,
-	HandleTimeout:  time.Second * 6,
+	HandleTimeout:  time.Second,
 }
 
 var NewClientCodecFuncMap map[Type]NewClientCodecFunc

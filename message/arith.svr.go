@@ -4,7 +4,6 @@ package message
 
 import (
 	"errors"
-	"time"
 )
 
 // ArithService Defining Computational Digital Services
@@ -13,7 +12,6 @@ type ArithService struct{}
 // Add addition
 func (this *ArithService) Add(args *ArithRequest, reply *ArithResponse) error {
 	reply.C = args.A + args.B
-	time.Sleep(time.Second * 2)
 	return nil
 }
 

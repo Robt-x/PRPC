@@ -1,7 +1,9 @@
 package PRPC
 
 import (
+	"PRPC/codec"
 	"PRPC/entity"
+	"PRPC/header"
 	"PRPC/logger"
 	"PRPC/message"
 	"PRPC/registry"
@@ -11,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/rpc"
 	"strings"
 	"sync"
 	"testing"
@@ -70,10 +73,17 @@ func startServer(regisAddr string, wg *sync.WaitGroup) {
 }
 func call(registryAddr string) {
 	d := registry.NewServiceDiscovery(registryAddr, 0)
-	xc := entity.NewClientWithDiscovery(d, registry.Random, nil)
+	xc := entity.NewClientWithDiscovery(d, registry.Random, &codec.Consult{
+		MagicNumber:    codec.MagicNumber,
+		CodecType:      codec.ProtoType,
+		Retry:          2,
+		CallTimeout:    time.Second,
+		ConnectTimeout: time.Second,
+		HandleTimeout:  time.Second,
+	})
 	defer func() { _ = xc.Close() }()
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 3; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -105,8 +115,44 @@ func Test(t *testing.T) {
 	//go startServer(registryAddr, &wg)
 	wg.Wait()
 	time.Sleep(2 * time.Second)
+	start := time.Now().UTC().UnixNano() / int64(time.Microsecond)
 	call(registryAddr)
-	time.Sleep(20 * time.Second)
+	end := time.Now().UTC().UnixNano() / int64(time.Microsecond)
+	fmt.Printf("%d ns\n", end-start)
+}
+func startServerWithoutRegistry(addr chan string, wg *sync.WaitGroup) {
+	l, _ := net.Listen("tcp", ":0")
+	server := entity.NewServer()
+	_ = server.Register(&message.ArithService{})
+	//server.HandleHTTP()
+	fmt.Printf("server addr: %s\n", l.Addr().String())
+	wg.Done()
+	addr <- l.Addr().String()
+	//_ = http.Serve(l, nil)
+	server.Accept(l)
+}
+func BenchmarkB(b *testing.B) {
+	log.SetFlags(0)
+	logger.SetLevel(logger.ErrorLevel)
+	addr := make(chan string)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go startServerWithoutRegistry(addr, &wg)
+	wg.Wait()
+	c, _ := entity.Dial("tcp", <-addr, &codec.Consult{
+		MagicNumber:    codec.MagicNumber,
+		CodecType:      codec.ProtoType,
+		Retry:          2,
+		CallTimeout:    time.Second,
+		ConnectTimeout: time.Second,
+		HandleTimeout:  time.Second,
+	})
+	var reply message.ArithResponse
+	args := &message.ArithRequest{A: int64(10), B: int64(2 * 10)}
+	for i := 0; i < b.N; i++ {
+		_ = c.Call("ArithService.Add", args, &reply)
+	}
+	_ = c.Close()
 }
 
 func TestRegistryToServer(t *testing.T) {
@@ -154,13 +200,12 @@ func TestSnowFlake(t *testing.T) {
 	if err != nil {
 		return
 	}
-	g1id := g.GenID()
-	g2 := entity.Generator{}
-	err = g.Init("2021-12-03", int64(g1id))
-	if err != nil {
-		return
-	}
-	fmt.Println(g1id, g2.GenID())
+	id := g.GenID()
+	h := header.RequestHeader{ID: id}
+	data := h.Marshal()
+	h.ResetHeader()
+	_ = h.UnMarshal(data)
+	fmt.Println(h.ID)
 }
 
 func Test_repeat(t *testing.T) {
@@ -189,7 +234,6 @@ func Test_repeat(t *testing.T) {
 	} else {
 		log.Printf("%s success: %d + %d = %d", "ArithService.Add", args.A, args.B, reply.C)
 	}
-	time.Sleep(20 * time.Second)
 }
 
 var rd *redis.Client = redis.NewClient(&redis.Options{
@@ -211,4 +255,27 @@ func Test_redis(t *testing.T) {
 	} else {
 		fmt.Println("already exist")
 	}
+}
+
+func BenchmarkRPC(b *testing.B) {
+	addr := make(chan string)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		l, _ := net.Listen("tcp", ":0")
+		s := rpc.NewServer()
+		_ = s.Register(&message.ArithService{})
+		fmt.Printf("server addr: %s\n", l.Addr().String())
+		wg.Done()
+		addr <- l.Addr().String()
+		s.Accept(l)
+	}()
+	wg.Wait()
+	c, _ := rpc.Dial("tcp", <-addr)
+	var reply message.ArithResponse
+	args := &message.ArithRequest{A: int64(10), B: int64(2 * 10)}
+	for i := 0; i < b.N; i++ {
+		_ = c.Call("ArithService.Add", args, &reply)
+	}
+	_ = c.Close()
 }
