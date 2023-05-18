@@ -36,7 +36,7 @@ type Registry struct {
 	aliveTimeout time.Duration
 	mu           sync.Mutex
 	tw           *timewheel.TimeWheel
-	serviceMap   map[string]*list.List
+	services     map[string]*list.List
 	servers      map[string]*ServerItem
 	subscribers  map[string]*timewheel.Timer
 }
@@ -45,7 +45,7 @@ func New(timeout time.Duration) *Registry {
 	rg := &Registry{
 		aliveTimeout: timeout,
 		tw:           timewheel.NewTimeWheel(time.Second, 60),
-		serviceMap:   make(map[string]*list.List),
+		services:     make(map[string]*list.List),
 		servers:      make(map[string]*ServerItem),
 		subscribers:  make(map[string]*timewheel.Timer),
 	}
@@ -58,7 +58,7 @@ var DefaultRegistry = New(defaultBeatTimeout)
 func (r *Registry) RegistryState() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for service, ptr := range r.serviceMap {
+	for service, ptr := range r.services {
 		fmt.Print(service + ": ")
 		for p := ptr.Front(); p != nil; p = p.Next() {
 			item := p.Value.(*ServerItem)
@@ -110,7 +110,7 @@ func (r *Registry) removeServer(addr string) {
 	}
 	delete(r.servers, addr)
 	for k, elem := range server.services {
-		r.serviceMap[k].Remove(elem)
+		r.services[k].Remove(elem)
 	}
 	r.tw.RemoveTask(server.t)
 }
@@ -120,13 +120,13 @@ func (r *Registry) addServices(addr string, services []string) {
 	for _, service := range services {
 		if _, ok := item.services[service]; !ok {
 			var elem *list.Element
-			sl := r.serviceMap[service]
+			sl := r.services[service]
 			if sl != nil {
 				elem = sl.PushBack(item)
 			} else {
 				sl = list.New()
 				elem = sl.PushBack(item)
-				r.serviceMap[service] = sl
+				r.services[service] = sl
 			}
 			item.services[service] = elem
 			logger.Infof("registryAddr: ", service, " register from ", addr)
@@ -143,10 +143,10 @@ func (r *Registry) removeService(addr string, service string) {
 		return
 	}
 	if elem, ok := item.services[service]; ok {
-		r.serviceMap[service].Remove(elem)
+		r.services[service].Remove(elem)
 		logger.Infof("registryAddr: ", service, " removed from ", addr)
-		if r.serviceMap[service].Len() == 0 {
-			delete(r.serviceMap, service)
+		if r.services[service].Len() == 0 {
+			delete(r.services, service)
 		}
 	}
 }
@@ -155,14 +155,14 @@ func (r *Registry) aliveServer(service string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var alive []string
-	ls := r.serviceMap[service]
+	ls := r.services[service]
 	for cur := ls.Front(); cur != nil; cur = cur.Next() {
 		s := cur.Value.(*ServerItem)
 		if r.aliveTimeout == 0 || s.start.Add(r.aliveTimeout).After(time.Now()) {
 			alive = append(alive, s.Addr)
 		} else {
 			for k, elem := range s.services {
-				r.serviceMap[k].Remove(elem)
+				r.services[k].Remove(elem)
 			}
 			delete(r.servers, s.Addr)
 		}
@@ -195,7 +195,7 @@ func (r *Registry) addSubscriber(subscriber string) {
 	t := r.tw.AddTask(defaultUpdateTimeout, func() {
 		services := make([]string, 0)
 		r.mu.Lock()
-		for k, _ := range r.serviceMap {
+		for k, _ := range r.services {
 			services = append(services, k)
 		}
 		r.mu.Unlock()
@@ -210,6 +210,7 @@ func (r *Registry) addSubscriber(subscriber string) {
 		if err != nil {
 			r.removeSubscriber(subscriber)
 		}
+		fmt.Println("ping pong")
 	}, true)
 	r.subscribers[subscriber] = t
 }
@@ -231,7 +232,7 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		case "ServiceDiscover":
 			services := make([]string, 0)
 			r.mu.Lock()
-			for k, _ := range r.serviceMap {
+			for k, _ := range r.services {
 				services = append(services, k)
 			}
 			r.mu.Unlock()
