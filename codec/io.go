@@ -15,8 +15,7 @@ func sendFrame(w io.Writer, data []byte) (err error) {
 		}
 		return
 	}
-	n := binary.PutUvarint(size[:], uint64(len(data)))
-	if err = write(w, size[:n]); err != nil {
+	if err = binary.Write(w, binary.BigEndian, uint64(len(data))); err != nil {
 		return
 	}
 	if err = write(w, data); err != nil {

@@ -34,6 +34,17 @@ func TestByteOrder(t *testing.T) {
 	fmt.Println(result)
 }
 
+func Test_Header(t *testing.T) {
+	h := &RequestHeader{}
+	htype := reflect.ValueOf(h).Elem().Type()
+	fmt.Println(htype.NumField())
+	ftype := htype.Field(3).Type
+	v := reflect.New(ftype).Elem()
+	b := uint64(1)
+	v.Set(reflect.ValueOf(b))
+	fmt.Println(v.Interface())
+}
+
 func Test_Mac(t *testing.T) {
 	conn, err := net.Dial("tcp", "10.128.240.242:80")
 	defer conn.Close()
@@ -42,28 +53,21 @@ func Test_Mac(t *testing.T) {
 	}
 	h := RequestHeader{
 		CompressType: 2,
-		Method:       "ADD",
+		Method:       "ADD不是",
 		ID:           33,
 	}
-	err = sendFrame(conn, h.Marshal())
+	data := h.Marshal()
+	var w io.Writer = bufio.NewWriter(conn)
+	err = sendFrame(w, data)
+	w.(*bufio.Writer).Flush()
 	if err != nil {
 		fmt.Println(err)
 	}
-	fmt.Println(00000)
 	select {}
 }
 
-//func sendFrame(w io.Writer, data []byte) (err error) {
-//	sendBytes := make([]byte, 8)
-//	binary.BigEndian.PutUint64(sendBytes, uint64(len(data)))
-//	sendBytes = append(sendBytes, data...)
-//	write(w, sendBytes)
-//	return
-//}
-
 func sendFrame(w io.Writer, data []byte) (err error) {
 	var size [binary.MaxVarintLen64]byte
-	w = bufio.NewWriter(w)
 	if data == nil || len(data) == 0 {
 		n := binary.PutUvarint(size[:], uint64(0))
 		if err = write(w, size[:n]); err != nil {
@@ -71,8 +75,7 @@ func sendFrame(w io.Writer, data []byte) (err error) {
 		}
 		return
 	}
-	n := binary.PutUvarint(size[:], uint64(len(data)))
-	if err = binary.Write(w, binary.BigEndian, size[:n]); err != nil {
+	if err = binary.Write(w, binary.BigEndian, uint64(len(data))); err != nil {
 		return
 	}
 	if err = write(w, data); err != nil {

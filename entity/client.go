@@ -48,8 +48,8 @@ type Client struct {
 	pending   map[uint64]*Call
 	header    header.RPCHeader
 	generator Generator
-	closing   bool
-	shutdown  bool
+	closing   bool //主动关闭
+	shutdown  bool //有错误发生时
 }
 
 type newClientFunc func(conn net.Conn, opt *codec.Consult) (*Client, error)

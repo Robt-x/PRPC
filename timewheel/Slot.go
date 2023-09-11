@@ -13,7 +13,7 @@ type Timer struct {
 	task       func()
 	duration   time.Duration
 	periodic   bool
-	s          unsafe.Pointer
+	slot       unsafe.Pointer
 	element    *list.Element
 }
 
@@ -27,11 +27,11 @@ func NewTimer(d time.Duration, f func(), periodic bool) *Timer {
 }
 
 func (t *Timer) getBucket() *Slot {
-	return (*Slot)(atomic.LoadPointer(&t.s))
+	return (*Slot)(atomic.LoadPointer(&t.slot))
 }
 
 func (t *Timer) setBucket(b *Slot) {
-	atomic.StorePointer(&t.s, unsafe.Pointer(b))
+	atomic.StorePointer(&t.slot, unsafe.Pointer(b))
 }
 
 func (t *Timer) stop() bool {
